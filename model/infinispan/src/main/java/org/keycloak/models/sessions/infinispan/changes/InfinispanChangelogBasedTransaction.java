@@ -237,6 +237,11 @@ public class InfinispanChangelogBasedTransaction<K, V extends SessionEntity> ext
 
             // Replace fail. Need to load latest entity from cache, apply updates again and try to replace in cache again
             if (!replaced) {
+                // PATCH: begin
+                // cache.replace(...) does not work for non-heap storage
+                CacheDecorators.skipCacheStore(cache).merge(key,newVersionEntity,(old, newEntity) -> newEntity, lifespanMs, TimeUnit.MILLISECONDS, maxIdleTimeMs, TimeUnit.MILLISECONDS);
+                logger.debugf("Merging key %s",key);
+                // PATCH: end
                 if (logger.isDebugEnabled()) {
                     logger.debugf("Replace failed for entity: %s, old version %s, new version %s. Will try again", key, oldVersionEntity.getVersion(), newVersionEntity.getVersion());
                 }

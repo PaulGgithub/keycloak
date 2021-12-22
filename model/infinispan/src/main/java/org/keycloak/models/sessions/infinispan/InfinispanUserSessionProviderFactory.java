@@ -19,6 +19,13 @@ package org.keycloak.models.sessions.infinispan;
 
 import org.infinispan.Cache;
 import org.infinispan.client.hotrod.RemoteCache;
+// PATCH: begin
+import org.infinispan.AdvancedCache;
+import org.infinispan.context.Flag;
+import org.infinispan.notifications.Listener;
+import org.infinispan.notifications.cachelistener.annotation.CacheEntriesEvicted;
+import org.infinispan.notifications.cachelistener.event.CacheEntriesEvictedEvent;
+// PATCH: end
 import org.infinispan.persistence.remote.RemoteStore;
 import org.jboss.logging.Logger;
 import org.keycloak.Config;
@@ -145,6 +152,28 @@ public class InfinispanUserSessionProviderFactory implements UserSessionProvider
                 }
             }
         });
+        // PATCH: begin
+        // Add new event listener on cache. When a userSessions is evicted, the corresponding clientSessions are also evicted
+        factory.register(new ProviderEventListener() {
+            @Override
+            public void onEvent(ProviderEvent event) {
+                if (event instanceof PostMigrationEvent) {
+                    KeycloakModelUtils.runJobInTransaction(factory,(KeycloakSession session)->{
+                        InfinispanConnectionProvider connections = session.getProvider(InfinispanConnectionProvider.class);
+                        Cache<String, SessionEntityWrapper<UserSessionEntity>> userSessionCache = connections.getCache(InfinispanConnectionProvider.USER_SESSION_CACHE_NAME);
+                        Cache<UUID, SessionEntityWrapper<AuthenticatedClientSessionEntity>> clientSessionCache = connections.getCache(InfinispanConnectionProvider.CLIENT_SESSION_CACHE_NAME);
+                        userSessionCache.addListener(new UserSessionEvictionListener(userSessionCache, clientSessionCache));
+                        log.infof("Added eviction listener to user session cache");
+
+                        Cache<String, SessionEntityWrapper<UserSessionEntity>> offlineSessionsCache = connections.getCache(InfinispanConnectionProvider.OFFLINE_USER_SESSION_CACHE_NAME);
+                        Cache<UUID, SessionEntityWrapper<AuthenticatedClientSessionEntity>> offlineClientSessionsCache = connections.getCache(InfinispanConnectionProvider.OFFLINE_CLIENT_SESSION_CACHE_NAME);
+                        offlineSessionsCache.addListener(new UserSessionEvictionListener(offlineSessionsCache,offlineClientSessionsCache));
+                        log.infof("Added eviction listener to offline user session cache");
+                    });
+                }
+            }
+        });
+        // PATCH: end
     }
 
     private boolean isPreloadingOfflineSessionsFromDatabaseEnabled() {
@@ -354,5 +383,44 @@ public class InfinispanUserSessionProviderFactory implements UserSessionProvider
     public int order() {
         return PROVIDER_PRIORITY;
     }
+
+    // PATCH: begin
+    @Listener(sync = false)
+    public static class UserSessionEvictionListener {
+        private final AdvancedCache<String, SessionEntityWrapper<UserSessionEntity>> userSessionCache;
+        private final AdvancedCache<UUID, SessionEntityWrapper<AuthenticatedClientSessionEntity>> clientSessionCache;
+
+        public UserSessionEvictionListener(Cache<String, SessionEntityWrapper<UserSessionEntity>> userSessionCache, Cache<UUID, SessionEntityWrapper<AuthenticatedClientSessionEntity>> clientSessionCache) {
+            this.userSessionCache = userSessionCache.getAdvancedCache().withFlags(Flag.IGNORE_RETURN_VALUES);
+            this.clientSessionCache = clientSessionCache.getAdvancedCache().withFlags(Flag.IGNORE_RETURN_VALUES);
+        }
+
+        @CacheEntriesEvicted
+        public void entriesEvicted(CacheEntriesEvictedEvent<String, SessionEntityWrapper<UserSessionEntity>> event) {
+            // Remove user session from the cache
+            event.getEntries()
+                    .keySet()
+                    .forEach(this::removeUserSession);
+
+            // Remove the corresponding client session caches
+            event.getEntries()
+                    .values()
+                    .forEach(this::removeClientSessions);
+        }
+
+        private void removeUserSession(String sessionCacheKey){
+            userSessionCache.remove(sessionCacheKey);
+            log.debugf("Removed user session cache %s",sessionCacheKey);
+        }
+
+        private void removeClientSessions(SessionEntityWrapper<UserSessionEntity> session) {
+            session.getEntity().getAuthenticatedClientSessions().
+                    forEach((clientSession, clientSessionUUID) -> {
+                        clientSessionCache.remove(clientSessionUUID);
+                        log.debugf("Removed client session %s with key %s", clientSession, clientSessionUUID);
+                    });
+        }
+    }
+    // PATCH: end
 }
 
