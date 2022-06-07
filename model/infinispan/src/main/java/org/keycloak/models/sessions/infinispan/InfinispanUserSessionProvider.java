@@ -225,11 +225,11 @@ public class InfinispanUserSessionProvider implements UserSessionProvider {
 
         UserSessionAdapter adapter = wrap(realm, entity, false);
         adapter.setPersistenceState(persistenceState);
-        
+
         if (adapter != null) {
             DeviceActivityManager.attachDevice(adapter, session);
         }
-        
+
         return adapter;
     }
 
@@ -262,6 +262,15 @@ public class InfinispanUserSessionProvider implements UserSessionProvider {
         }
 
         if (!offline) {
+            // BEGIN PATCH
+            // Lookup the offline session and import it as an online session
+            // see InfinispanUserSessionProvider.getUserSessionEntityFromPersistenceProvider
+            UserSessionEntity userSessionEntityFromPersistenceProvider = getUserSessionEntityFromPersistenceProvider(realm, id, false);
+            if (userSessionEntityFromPersistenceProvider != null) {
+                // we successfully recovered the offline session!
+                return wrap(realm, userSessionEntityFromPersistenceProvider, false);
+            }
+            // END PATCH
             return null;
         }
 
@@ -281,8 +290,14 @@ public class InfinispanUserSessionProvider implements UserSessionProvider {
 
         log.debugf("Offline user-session not found in infinispan, attempting UserSessionPersisterProvider lookup for sessionId=%s", sessionId);
         UserSessionPersisterProvider persister = session.getProvider(UserSessionPersisterProvider.class);
-        UserSessionModel persistentUserSession = persister.loadUserSession(realm, sessionId, offline);
-
+        // BEGIN PATCH
+        // We know that keycloak only stores offline sessions in the db so there is no point in looking at online sessions
+        UserSessionModel persistentUserSession = persister.loadUserSession(realm, sessionId, true);
+        if (persistentUserSession != null && !offline) {
+            // import the offline session too as the online session will be imported at the end of this function
+            importUserSession(realm, true, persistentUserSession);
+        }
+        // END PATCH
         if (persistentUserSession == null) {
             log.debugf("Offline user-session not found in UserSessionPersisterProvider for sessionId=%s", sessionId);
             return null;
