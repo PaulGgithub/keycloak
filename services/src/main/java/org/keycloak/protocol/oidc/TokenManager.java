@@ -141,8 +141,26 @@ public class TokenManager {
             // Find userSession regularly for online tokens
             userSession = session.sessions().getUserSession(realm, oldToken.getSessionState());
             if (!AuthenticationManager.isSessionValid(realm, userSession)) {
-                AuthenticationManager.backchannelLogout(session, realm, userSession, uriInfo, connection, headers, true);
-                throw new OAuthErrorException(OAuthErrorException.INVALID_GRANT, "Session not active", "Session not active");
+                // BEGIN PATCH
+                /* Search for an offline session if the online session is not found.
+                 * We want to migrate the online sessions to offline sessions. That means that even if there are no online sessions
+                 * present, we want to look the offline session even if the token does not include `offline_access` scope.
+                 */
+                UserSessionManager sessionManager = new UserSessionManager(session);
+                userSession = sessionManager.findOfflineUserSession(realm, oldToken.getSessionState());
+                if (userSession != null) {
+
+                    // Revoke timeouted offline userSession
+                    if (!AuthenticationManager.isOfflineSessionValid(realm, userSession)) {
+                        sessionManager.revokeOfflineUserSession(userSession);
+                        throw new OAuthErrorException(OAuthErrorException.INVALID_GRANT, "Offline session not active", "Offline session not active");
+                    }
+
+                } else {
+                    AuthenticationManager.backchannelLogout(session, realm, userSession, uriInfo, connection, headers, true);
+                    throw new OAuthErrorException(OAuthErrorException.INVALID_GRANT, "Online and offline session not active", "Online and offline session not active");
+                }
+                // END PATCH
             }
         }
 
